@@ -1,14 +1,18 @@
 [variables]
 NODE_ENV = "production"
+NPM_CONFIG_PRODUCTION = "true"
 
 [phases.setup]
 nixPkgs = ["nodejs_18", "pandoc"]
 
 [phases.install]
-cmds = ["npm ci --production"]
+cmds = [
+  "npm ci --production --no-optional",
+  "mkdir -p uploads output"
+]
 
 [phases.build]
-cmds = ["echo 'Build completed'"]
+cmds = ["echo 'Build completed successfully'"]
 
 [start]
 cmd = "npm start" 
