@@ -6,7 +6,7 @@ class HTMLProcessor {
   // 主要的HTML处理函数
   async processHtml(html) {
     try {
-      console.log('开始处理HTML，保持MathML格式...');
+      console.log('开始处理HTML，优化MathML格式...');
       
       // 使用cheerio解析HTML
       const $ = cheerio.load(html, {
@@ -17,11 +17,14 @@ class HTMLProcessor {
       // 添加中文字体样式
       this.addChineseFontStyle($);
       
-      // 保持MathML不变，只进行基本清理
+      // 修复mmultiscripts问题
+      this.fixMmultiscripts($);
+      
+      // 保持其他MathML不变，只进行基本清理
       this.cleanHtml($);
       
       const processedHtml = $.html();
-      console.log('HTML处理完成，MathML已保留，已设置宋体字体');
+      console.log('HTML处理完成，MathML已优化，已设置宋体字体');
       
       return processedHtml;
     } catch (error) {
@@ -231,6 +234,71 @@ class HTMLProcessor {
       }
     });
     return result;
+  }
+  
+  // 修复mmultiscripts显示问题
+  fixMmultiscripts($) {
+    $('mmultiscripts').each((index, element) => {
+      try {
+        const $multiscripts = $(element);
+        const children = $multiscripts.children();
+        
+        if (children.length >= 2) {
+          const baseElement = $(children[0]); // 基础元素（如C、X）
+          const prescriptsIndex = children.index($multiscripts.find('mprescripts')[0]);
+          
+          if (prescriptsIndex >= 0 && prescriptsIndex + 1 < children.length) {
+            // 有前置脚本（如原子序数）
+            const prescriptNumber = $(children[prescriptsIndex + 1]);
+            
+            // 创建新的上标结构：{}^{12}C
+            const newStructure = `
+              <mrow>
+                <msup>
+                  <mrow></mrow>
+                  <mn>${prescriptNumber.text()}</mn>
+                </msup>
+                <mi>${baseElement.text()}</mi>
+              </mrow>
+            `;
+            
+            $multiscripts.replaceWith(newStructure);
+            console.log(`修复了第 ${index + 1} 个mmultiscripts元素: ${baseElement.text()}`);
+          } else {
+            // 没有前置脚本，可能是后置上标
+            if (children.length >= 3) {
+              const subscript = $(children[1]);
+              const superscript = $(children[2]);
+              
+              const newStructure = `
+                <msubsup>
+                  <mi>${baseElement.text()}</mi>
+                  <mn>${subscript.text()}</mn>
+                  <mn>${superscript.text()}</mn>
+                </msubsup>
+              `;
+              
+              $multiscripts.replaceWith(newStructure);
+              console.log(`修复了第 ${index + 1} 个mmultiscripts元素（上下标）: ${baseElement.text()}`);
+            } else {
+              // 简单的上标
+              const superscript = $(children[1]);
+              const newStructure = `
+                <msup>
+                  <mi>${baseElement.text()}</mi>
+                  <mn>${superscript.text()}</mn>
+                </msup>
+              `;
+              
+              $multiscripts.replaceWith(newStructure);
+              console.log(`修复了第 ${index + 1} 个mmultiscripts元素（上标）: ${baseElement.text()}`);
+            }
+          }
+        }
+      } catch (error) {
+        console.error(`处理第 ${index + 1} 个mmultiscripts元素时出错:`, error);
+      }
+    });
   }
   
   // 添加中文字体样式
