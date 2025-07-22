@@ -97,11 +97,18 @@ app.post('/convert', async (req, res) => {
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
       res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
       
-      // 发送文件并在发送完成后删除临时文件
+      // 发送文件并清理临时文件
       res.sendFile(result.filepath, (err) => {
-        if (!err) {
-          fs.unlink(result.filepath).catch(console.error);
-          fs.unlink(result.tempHtmlPath).catch(console.error);
+        // 清除定时器
+        if (result.cleanupTimer) {
+          clearTimeout(result.cleanupTimer);
+        }
+        
+        // 无论成功失败都清理文件
+        cleanupFiles([result.filepath, result.tempHtmlPath]);
+        
+        if (err) {
+          console.error('文件发送失败:', err);
         }
       });
     } else {
@@ -142,9 +149,16 @@ app.post('/convert/file', upload.single('htmlFile'), async (req, res) => {
       res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
       
       res.sendFile(result.filepath, (err) => {
-        if (!err) {
-          fs.unlink(result.filepath).catch(console.error);
-          fs.unlink(result.tempHtmlPath).catch(console.error);
+        // 清除定时器
+        if (result.cleanupTimer) {
+          clearTimeout(result.cleanupTimer);
+        }
+        
+        // 无论成功失败都清理文件
+        cleanupFiles([result.filepath, result.tempHtmlPath]);
+        
+        if (err) {
+          console.error('文件发送失败:', err);
         }
       });
     } else {
@@ -169,6 +183,11 @@ async function convertHtmlToDocx(html, filename = null) {
   const tempHtmlPath = path.join(uploadsDir, `temp-${taskId}.html`);
   const outputPath = path.join(outputDir, outputFilename);
 
+  // 设置自动清理定时器（30秒后强制清理）
+  const cleanupTimer = setTimeout(() => {
+    cleanupFiles([tempHtmlPath, outputPath]);
+  }, 30000);
+
   try {
     console.log('开始处理HTML内容...');
     
@@ -189,7 +208,8 @@ async function convertHtmlToDocx(html, filename = null) {
         success: true,
         filename: outputFilename,
         filepath: outputPath,
-        tempHtmlPath: tempHtmlPath
+        tempHtmlPath: tempHtmlPath,
+        cleanupTimer: cleanupTimer
       };
     } else {
       throw new Error('Pandoc转换失败');
@@ -197,9 +217,9 @@ async function convertHtmlToDocx(html, filename = null) {
   } catch (error) {
     console.error('转换过程出错:', error);
     
-    // 清理临时文件
-    fs.unlink(tempHtmlPath).catch(() => {});
-    fs.unlink(outputPath).catch(() => {});
+    // 清除定时器并立即清理
+    clearTimeout(cleanupTimer);
+    cleanupFiles([tempHtmlPath, outputPath]);
     
     return {
       success: false,
@@ -250,6 +270,111 @@ function runPandoc(inputPath, outputPath) {
   });
 }
 
+// 文件清理工具函数
+async function cleanupFiles(filePaths) {
+  for (const filePath of filePaths) {
+    try {
+      await fs.unlink(filePath);
+      console.log(`已清理临时文件: ${path.basename(filePath)}`);
+    } catch (error) {
+      // 文件可能已被删除或不存在，忽略错误
+      if (error.code !== 'ENOENT') {
+        console.warn(`清理文件失败 ${filePath}:`, error.message);
+      }
+    }
+  }
+}
+
+// 定期清理旧的临时文件
+function setupPeriodicCleanup() {
+  const cleanupInterval = setInterval(async () => {
+    try {
+      console.log('🧹 执行定期清理...');
+      
+      // 清理uploads目录中的旧文件（超过1小时）
+      const uploadFiles = await fs.readdir(uploadsDir);
+      for (const file of uploadFiles) {
+        const filePath = path.join(uploadsDir, file);
+        const stats = await fs.stat(filePath);
+        const ageInHours = (Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60);
+        
+        if (ageInHours > 1) {
+          await fs.unlink(filePath);
+          console.log(`清理旧的上传文件: ${file}`);
+        }
+      }
+      
+      // 清理output目录中的旧文件（超过1小时）
+      const outputFiles = await fs.readdir(outputDir);
+      for (const file of outputFiles) {
+        const filePath = path.join(outputDir, file);
+        const stats = await fs.stat(filePath);
+        const ageInHours = (Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60);
+        
+        if (ageInHours > 1) {
+          await fs.unlink(filePath);
+          console.log(`清理旧的输出文件: ${file}`);
+        }
+      }
+      
+    } catch (error) {
+      console.warn('定期清理过程中出错:', error.message);
+    }
+  }, 30 * 60 * 1000); // 每30分钟清理一次
+  
+  // 确保进程退出时清理定时器
+  process.on('SIGTERM', () => {
+    clearInterval(cleanupInterval);
+  });
+  
+  process.on('SIGINT', () => {
+    clearInterval(cleanupInterval);
+  });
+}
+
+// 进程退出时的清理
+process.on('exit', () => {
+  console.log('🧹 进程退出，正在清理临时文件...');
+});
+
+process.on('SIGTERM', async () => {
+  console.log('🧹 收到SIGTERM，正在清理临时文件...');
+  try {
+    // 清理所有临时目录
+    await cleanupAllTempFiles();
+  } catch (error) {
+    console.error('退出清理失败:', error);
+  }
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('🧹 收到SIGINT，正在清理临时文件...');
+  try {
+    await cleanupAllTempFiles();
+  } catch (error) {
+    console.error('退出清理失败:', error);
+  }
+  process.exit(0);
+});
+
+// 清理所有临时文件
+async function cleanupAllTempFiles() {
+  try {
+    const uploadFiles = await fs.readdir(uploadsDir);
+    const outputFiles = await fs.readdir(outputDir);
+    
+    await Promise.all([
+      ...uploadFiles.map(file => fs.unlink(path.join(uploadsDir, file)).catch(() => {})),
+      ...outputFiles.map(file => fs.unlink(path.join(outputDir, file)).catch(() => {}))
+    ]);
+    
+    console.log('临时文件清理完成');
+  } catch (error) {
+    console.warn('清理所有临时文件时出错:', error.message);
+  }
+}
+
 // 启动服务器
 app.listen(PORT, async () => {
   console.log(`🚀 HTML2DOCX API 服务已启动`);
@@ -264,6 +389,10 @@ app.listen(PORT, async () => {
     console.log('   Windows安装说明: https://pandoc.org/installing.html');
     console.log('   或者运行 install.bat 脚本进行自动安装检查');
   }
+  
+  // 启动定期清理
+  setupPeriodicCleanup();
+  console.log('🧹 定期清理机制已启动（每30分钟清理一次超过1小时的临时文件）');
 });
 
 module.exports = app; 
